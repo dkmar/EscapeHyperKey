@@ -4,16 +4,6 @@
 //
 //  Created by Daniel Mar on 1/29/22.
 //
-//  We want to
-// Listen for events
-// Handle key event
-/*
- If capslock is pressed for
- <  1/8 second --> send escape
- >= 1/8 second --> send control
- 
- 
- */
 //
 //
 
@@ -21,16 +11,23 @@ import Foundation
 
 print(main())
 
+
+
+final class ControlEscape {
+    enum EscapeStatus {
+        case Unpressed, Pressed, Held
+    }
+    var escapeStatus: EscapeStatus = .Unpressed
+//    var isControlPressed = false
+}
+
 func main() -> Int32 {
     let eventMask =   (1 << CGEventType.keyDown.rawValue)
                     | (1 << CGEventType.keyUp.rawValue)
                     | (1 << CGEventType.tapDisabledByTimeout.rawValue)
                     | (1 << CGEventType.flagsChanged.rawValue)
     
-//    final class ControlEscape {
-//        var isControlPressed = false
-//    }
-//    let state = ControlEscape()
+    let state = ControlEscape()
     
     guard let eventTap = CGEvent.tapCreate(
         tap: .cgSessionEventTap,
@@ -38,7 +35,7 @@ func main() -> Int32 {
         options: .defaultTap,
         eventsOfInterest: CGEventMask(eventMask),
         callback: eventHandler,
-        userInfo: nil //UnsafeMutableRawPointer(Unmanaged.passRetained(state).toOpaque())
+        userInfo: UnsafeMutableRawPointer(Unmanaged.passRetained(state).toOpaque())
     ) else {
         print("failed to create event tap")
         return EXIT_FAILURE
@@ -52,55 +49,84 @@ func main() -> Int32 {
     return EXIT_SUCCESS
 }
 
-func getTypeString(type: CGEventType) -> String {
-    switch type {
-    case .keyUp:
-        return "keyUp"
-    case .keyDown:
-        return "keyDown"
-    case .flagsChanged:
-        return "flagsChanged"
-    case .tapDisabledByTimeout:
-        return "tapDisabledByTimeout"
-    default:
-        return "other"
-    }
-}
 
 fileprivate func eventHandler(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent,
-                              userInfo: UnsafeMutableRawPointer?) -> Unmanaged<CGEvent>? {
-    let stmt = """
-    type: \(getTypeString(type: type))
-    keycode: \(String(format: "%02X", event.getIntegerValueField(.keyboardEventKeycode)))
-    autorepeat code: \(String(format: "%02X", event.getIntegerValueField(.keyboardEventAutorepeat)))
-    event flags:
-        Caps Lock: \(event.flags.contains(.maskAlphaShift))
-        Shift: \(event.flags.contains(.maskShift))
-        Control: \(event.flags.contains(.maskControl))
-        Option: \(event.flags.contains(.maskAlternate))
-        Command: \(event.flags.contains(.maskCommand))
+                              refcon: UnsafeMutableRawPointer?) -> Unmanaged<CGEvent>? {
+    // Decimal value of 0x35, the virtual key code for "escape"
+    let kVK_ESCAPE = Int("35", radix: 16)!
+    // Decimal value of 0x3B, the virtual key code for "control"
+    let kVK_CONTROL = Int("3B", radix: 16)!
+    let state = Unmanaged<ControlEscape>.fromOpaque(refcon!).takeUnretainedValue()
     
-    """
-    print(stmt)
-    return Unmanaged.passRetained(event)
-//    switch type {
-//    case .keyUp, .keyDown:
-//        <#code#>
+    switch type {
+    case .flagsChanged:
+        // edit event to include control modifier if pressed
+        if state.escapeStatus != .Unpressed {
+            event.flags.insert(.maskControl)
+        }
+        return Unmanaged.passRetained(event)
+    case .keyDown:
+        let (keycode, isRepeat) = (Int(event.getIntegerValueField(.keyboardEventKeycode)), Int(event.getIntegerValueField(.keyboardEventAutorepeat)))
+        switch (keycode, isRepeat) {
+        case (kVK_ESCAPE, 0):
+            // we don't know if this is escape or control yet.
+            state.escapeStatus = .Pressed
+            // drop it
+            return nil
+        case (kVK_ESCAPE, 1):
+            // we know user wants control behavior.
+            // post control down event
+            let controlDown = CGEvent(keyboardEventSource: nil, virtualKey: CGKeyCode(kVK_CONTROL), keyDown: true)
+            controlDown?.tapPostEvent(proxy)
+            // set control flag for subsequent key events
+            state.escapeStatus = .Held
+//            state.isControlPressed = true
+            return nil
+        default:
+            // edit event to include control modifier if pressed
+            if state.escapeStatus != .Unpressed {
+                event.flags.insert(.maskControl)
+                state.escapeStatus = .Held
+            }
+            return Unmanaged.passRetained(event)
+        }
+    case .keyUp:
+        let keycode = Int(event.getIntegerValueField(.keyboardEventKeycode))
+        switch (keycode, state.escapeStatus) {
+        case (kVK_ESCAPE, .Pressed):
+            // we know user wants escape behavior
+            // send escape down
+            let escapeDown = CGEvent(keyboardEventSource: nil, virtualKey: CGKeyCode(kVK_ESCAPE), keyDown: true)
+            escapeDown?.tapPostEvent(proxy)
+            // return escape up (thereby completing the "escape" behavior)
+            event.setIntegerValueField(.keyboardEventKeycode, value: Int64(kVK_ESCAPE))
+            state.escapeStatus = .Unpressed
+            return Unmanaged.passRetained(event)
+        case (kVK_ESCAPE, .Held):
+            // user wants control behavior
+            // send control up
+            let controlUp = CGEvent(keyboardEventSource: nil, virtualKey: CGKeyCode(kVK_CONTROL), keyDown: false)
+            controlUp?.tapPostEvent(proxy)
+            // unset control flag for subsequent key events
+            state.escapeStatus = .Unpressed
+//            state.isControlPressed = false
+            return nil
+        default:
+            // edit event to include control modifier if pressed
+            if state.escapeStatus != .Unpressed {
+                event.flags.insert(.maskControl)
+                state.escapeStatus = .Held
+            }
+            return Unmanaged.passRetained(event)
+        }
 //    case .tapDisabledByTimeout:
-//
-//    default:
-//        return Unmanaged.passRetained(event)
-//    }
-//    var isCaps = CGEventFlags.maskAlphaShift(cgEvent)
-}
-
-func printEventFlags(flags: CGEventFlags) {
-    let keys = ["Caps Lock", "Shift", "Control", "Option", "Command"]
-    let vals = [CGEventFlags.maskAlphaShift, CGEventFlags.maskShift, CGEventFlags.maskControl, CGEventFlags.maskAlternate, CGEventFlags.maskCommand]
-    for (key, value) in zip(keys, vals) {
-        print("\t\(key): \(value)")
+//        // TODO
+//        print("tap disabled by timeout")
+    default:
+        return Unmanaged.passRetained(event)
     }
 }
-        
+
+
 
 
