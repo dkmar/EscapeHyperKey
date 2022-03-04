@@ -7,35 +7,35 @@
 //
 //
 
+import CoreGraphics
 import Foundation
 
 print(main())
 
-
-
-final class ControlEscape {
-    enum EscapeStatus {
-        case Unpressed, Pressed, Held
-    }
-    var escapeStatus: EscapeStatus = .Unpressed
-//    var isControlPressed = false
+enum KeyCodes {
+    static let kVK_ESCAPE = Int("35", radix: 16)!
+    static let kVK_CONTROL = Int("3B", radix: 16)!
 }
+enum KeyStatus {
+    case Pressed, Held
+}
+
+// status of the escape key
+fileprivate var keyStatus: KeyStatus? = .none
 
 func main() -> Int32 {
     let eventMask =   (1 << CGEventType.keyDown.rawValue)
                     | (1 << CGEventType.keyUp.rawValue)
                     | (1 << CGEventType.tapDisabledByTimeout.rawValue)
                     | (1 << CGEventType.flagsChanged.rawValue)
-    
-    let state = ControlEscape()
-    
+
     guard let eventTap = CGEvent.tapCreate(
         tap: .cgSessionEventTap,
         place: .headInsertEventTap,
         options: .defaultTap,
         eventsOfInterest: CGEventMask(eventMask),
         callback: eventHandler,
-        userInfo: UnsafeMutableRawPointer(Unmanaged.passRetained(state).toOpaque())
+        userInfo: nil
     ) else {
         print("failed to create event tap")
         return EXIT_FAILURE
@@ -49,79 +49,85 @@ func main() -> Int32 {
     return EXIT_SUCCESS
 }
 
-
 fileprivate func eventHandler(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent,
                               refcon: UnsafeMutableRawPointer?) -> Unmanaged<CGEvent>? {
-    // Decimal value of 0x35, the virtual key code for "escape"
-    let kVK_ESCAPE = Int("35", radix: 16)!
-    // Decimal value of 0x3B, the virtual key code for "control"
-    let kVK_CONTROL = Int("3B", radix: 16)!
-    let state = Unmanaged<ControlEscape>.fromOpaque(refcon!).takeUnretainedValue()
-    
     switch type {
     case .flagsChanged:
         // edit event to include control modifier if pressed
-        if state.escapeStatus != .Unpressed {
+        if keyStatus != nil {
             event.flags.insert(.maskControl)
         }
         return Unmanaged.passRetained(event)
     case .keyDown:
         let (keycode, isRepeat) = (Int(event.getIntegerValueField(.keyboardEventKeycode)), Int(event.getIntegerValueField(.keyboardEventAutorepeat)))
         switch (keycode, isRepeat) {
-        case (kVK_ESCAPE, 0):
+        case (KeyCodes.kVK_ESCAPE, 0):
             // we don't know if this is escape or control yet.
-            state.escapeStatus = .Pressed
+            keyStatus = .Pressed
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                if keyStatus == .Pressed {
+                    keyStatus = .Held
+                }
+            }
             // drop it
             return nil
-        case (kVK_ESCAPE, 1):
+        case (KeyCodes.kVK_ESCAPE, 1):
+            if keyStatus == .Held {
+                return nil
+            }
+            
             // we know user wants control behavior.
-            // post control down event
-            let controlDown = CGEvent(keyboardEventSource: nil, virtualKey: CGKeyCode(kVK_CONTROL), keyDown: true)
-            controlDown?.tapPostEvent(proxy)
+            guard let controlDown = CGEvent(keyboardEventSource: CGEventSource(event: event), virtualKey: CGKeyCode(KeyCodes.kVK_CONTROL), keyDown: true) else {
+                return nil
+            }
+
             // set control flag for subsequent key events
-            state.escapeStatus = .Held
-//            state.isControlPressed = true
-            return nil
+            keyStatus = .Held
+            // post control down
+            return Unmanaged.passRetained(controlDown)
         default:
             // edit event to include control modifier if pressed
-            if state.escapeStatus != .Unpressed {
+            if keyStatus != nil {
                 event.flags.insert(.maskControl)
-                state.escapeStatus = .Held
+                if keyStatus == .Pressed {
+                    keyStatus = .Held
+                }
             }
             return Unmanaged.passRetained(event)
         }
     case .keyUp:
         let keycode = Int(event.getIntegerValueField(.keyboardEventKeycode))
-        switch (keycode, state.escapeStatus) {
-        case (kVK_ESCAPE, .Pressed):
+        switch (keycode, keyStatus) {
+        case (KeyCodes.kVK_ESCAPE, .Pressed):
             // we know user wants escape behavior
+            keyStatus = .none
             // send escape down
-            let escapeDown = CGEvent(keyboardEventSource: nil, virtualKey: CGKeyCode(kVK_ESCAPE), keyDown: true)
+            let escapeDown = CGEvent(keyboardEventSource: CGEventSource(event: event), virtualKey: CGKeyCode(KeyCodes.kVK_ESCAPE), keyDown: true)
             escapeDown?.tapPostEvent(proxy)
             // return escape up (thereby completing the "escape" behavior)
-            event.setIntegerValueField(.keyboardEventKeycode, value: Int64(kVK_ESCAPE))
-            state.escapeStatus = .Unpressed
+            event.setIntegerValueField(.keyboardEventKeycode, value: Int64(KeyCodes.kVK_ESCAPE))
             return Unmanaged.passRetained(event)
-        case (kVK_ESCAPE, .Held):
+        case (KeyCodes.kVK_ESCAPE, .Held):
             // user wants control behavior
-            // send control up
-            let controlUp = CGEvent(keyboardEventSource: nil, virtualKey: CGKeyCode(kVK_CONTROL), keyDown: false)
-            controlUp?.tapPostEvent(proxy)
             // unset control flag for subsequent key events
-            state.escapeStatus = .Unpressed
-//            state.isControlPressed = false
-            return nil
+            keyStatus = .none
+            // send control up
+            guard let controlUp = CGEvent(keyboardEventSource: CGEventSource(event: event), virtualKey: CGKeyCode(KeyCodes.kVK_CONTROL), keyDown: false) else {
+                return nil
+            }
+
+            return Unmanaged.passRetained(controlUp)
         default:
             // edit event to include control modifier if pressed
-            if state.escapeStatus != .Unpressed {
+            if keyStatus != nil {
                 event.flags.insert(.maskControl)
-                state.escapeStatus = .Held
             }
             return Unmanaged.passRetained(event)
         }
-//    case .tapDisabledByTimeout:
-//        // TODO
-//        print("tap disabled by timeout")
+    case .tapDisabledByTimeout:
+        // TODO
+        print("tap disabled by timeout")
+        return Unmanaged.passRetained(event)
     default:
         return Unmanaged.passRetained(event)
     }
