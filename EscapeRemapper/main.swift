@@ -8,61 +8,78 @@
 //
 
 import CoreGraphics
-import Foundation
-
-print(main())
 
 enum KeyCodes {
-    static let kVK_ESCAPE = Int("35", radix: 16)!
-    static let kVK_CONTROL = Int("3B", radix: 16)!
+    static let kVK_ESCAPE: Int64 = 53
+    static let kVK_CONTROL: Int64 = 59
+    static let kVK_OPTION: Int64 = 58
+    static let kVK_COMMAND: Int64 = 55
+    static let kVK_SHIFT: Int64 = 57
 }
+
 enum KeyStatus {
     case Pressed, Held
 }
 
+private let HyperFlags = CGEventFlags([
+    .maskCommand, .maskControl, .maskAlternate, .maskShift,
+])
+
 // status of the escape key
-fileprivate var keyStatus: KeyStatus? = .none
+private var keyStatus: KeyStatus? = .none
 
 func main() -> Int32 {
-    let eventMask =   (1 << CGEventType.keyDown.rawValue)
-                    | (1 << CGEventType.keyUp.rawValue)
-                    | (1 << CGEventType.tapDisabledByTimeout.rawValue)
-                    | (1 << CGEventType.flagsChanged.rawValue)
+    let eventMask =
+        (1 << CGEventType.keyDown.rawValue)
+        | (1 << CGEventType.keyUp.rawValue)
+        | (1 << CGEventType.tapDisabledByTimeout.rawValue)
+        | (1 << CGEventType.flagsChanged.rawValue)
 
-    guard let eventTap = CGEvent.tapCreate(
-        tap: .cgSessionEventTap,
-        place: .headInsertEventTap,
-        options: .defaultTap,
-        eventsOfInterest: CGEventMask(eventMask),
-        callback: eventHandler,
-        userInfo: nil
-    ) else {
+    guard
+        let eventTap = CGEvent.tapCreate(
+            tap: .cgSessionEventTap,
+            place: .headInsertEventTap,
+            options: .defaultTap,
+            eventsOfInterest: CGEventMask(eventMask),
+            callback: eventHandler,
+            userInfo: nil
+        )
+    else {
         print("failed to create event tap")
         return EXIT_FAILURE
     }
-    
-    let runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, eventTap, 0)
+
+    let runLoopSource = CFMachPortCreateRunLoopSource(
+        kCFAllocatorDefault, eventTap, 0)
     CFRunLoopAddSource(CFRunLoopGetCurrent(), runLoopSource, .commonModes)
     CGEvent.tapEnable(tap: eventTap, enable: true)
     CFRunLoopRun()
-    
+
     return EXIT_SUCCESS
 }
 
-fileprivate func eventHandler(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent,
-                              refcon: UnsafeMutableRawPointer?) -> Unmanaged<CGEvent>? {
+
+let eventHandler: CGEventTapCallBack = { proxy, type, event, _ -> Unmanaged<CGEvent>? in
     switch type {
+    // modifiers added
     case .flagsChanged:
-        // edit event to include control modifier if pressed
+        // apply hyper if escape has already been pressed
         if keyStatus != nil {
-            event.flags.insert(.maskControl)
+            event.flags.formUnion(HyperFlags)
         }
-        return Unmanaged.passRetained(event)
+        return Unmanaged.passUnretained(event)
+        
+    // key press
     case .keyDown:
-        let (keycode, isRepeat) = (Int(event.getIntegerValueField(.keyboardEventKeycode)), Int(event.getIntegerValueField(.keyboardEventAutorepeat)))
+        let (keycode, isRepeat) = (
+            event.getIntegerValueField(.keyboardEventKeycode),
+            event.getIntegerValueField(.keyboardEventAutorepeat)
+        )
+        
         switch (keycode, isRepeat) {
+        // first depression of escape
         case (KeyCodes.kVK_ESCAPE, 0):
-            // we don't know if this is escape or control yet.
+            // we don't know if this is escape or hyper yet.
             keyStatus = .Pressed
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
                 if keyStatus == .Pressed {
@@ -71,68 +88,65 @@ fileprivate func eventHandler(proxy: CGEventTapProxy, type: CGEventType, event: 
             }
             // drop it
             return nil
-        case (KeyCodes.kVK_ESCAPE, 1):
-            if keyStatus == .Held {
-                return nil
-            }
             
-            // we know user wants control behavior.
-            guard let controlDown = CGEvent(keyboardEventSource: CGEventSource(event: event), virtualKey: CGKeyCode(KeyCodes.kVK_CONTROL), keyDown: true) else {
-                return nil
-            }
-
-            // set control flag for subsequent key events
+        // repeat press of escape
+        case (KeyCodes.kVK_ESCAPE, 1):
+            // mark as held
             keyStatus = .Held
-            // post control down
-            return Unmanaged.passRetained(controlDown)
+            
+            // we know user wants hyper behavior.
+            event.setIntegerValueField(.keyboardEventKeycode, value: KeyCodes.kVK_CONTROL)
+            event.flags.formUnion(HyperFlags)
+            
+        // pressing some other key
         default:
-            // edit event to include control modifier if pressed
+            // apply hyper if escape has already been pressed
             if keyStatus != nil {
-                event.flags.insert(.maskControl)
-                if keyStatus == .Pressed {
-                    keyStatus = .Held
-                }
+                event.flags.formUnion(HyperFlags)
+                keyStatus = .Held
             }
-            return Unmanaged.passRetained(event)
         }
+        return Unmanaged.passUnretained(event)
+        
+    // key released
     case .keyUp:
-        let keycode = Int(event.getIntegerValueField(.keyboardEventKeycode))
+        let keycode = event.getIntegerValueField(.keyboardEventKeycode)
         switch (keycode, keyStatus) {
+        // escape pressed and immediately released
         case (KeyCodes.kVK_ESCAPE, .Pressed):
             // we know user wants escape behavior
+            // unset flag for subsequent key events
             keyStatus = .none
             // send escape down
-            let escapeDown = CGEvent(keyboardEventSource: CGEventSource(event: event), virtualKey: CGKeyCode(KeyCodes.kVK_ESCAPE), keyDown: true)
+            let escapeDown = CGEvent(
+                keyboardEventSource: CGEventSource(event: event),
+                virtualKey: CGKeyCode(KeyCodes.kVK_ESCAPE),
+                keyDown: true
+            )
             escapeDown?.tapPostEvent(proxy)
-            // return escape up (thereby completing the "escape" behavior)
-            event.setIntegerValueField(.keyboardEventKeycode, value: Int64(KeyCodes.kVK_ESCAPE))
-            return Unmanaged.passRetained(event)
+            // we keep event to do escape up (thereby completing the "escape" behavior)
+            
         case (KeyCodes.kVK_ESCAPE, .Held):
             // user wants control behavior
-            // unset control flag for subsequent key events
+            // unset flag for subsequent key events
             keyStatus = .none
             // send control up
-            guard let controlUp = CGEvent(keyboardEventSource: CGEventSource(event: event), virtualKey: CGKeyCode(KeyCodes.kVK_CONTROL), keyDown: false) else {
-                return nil
-            }
-
-            return Unmanaged.passRetained(controlUp)
+            event.setIntegerValueField(.keyboardEventKeycode, value: KeyCodes.kVK_CONTROL)
+            
         default:
-            // edit event to include control modifier if pressed
+            // apply hyper if escape has already been pressed
             if keyStatus != nil {
-                event.flags.insert(.maskControl)
+                event.flags.formUnion(HyperFlags)
             }
-            return Unmanaged.passRetained(event)
         }
-    case .tapDisabledByTimeout:
-        // TODO
-        print("tap disabled by timeout")
-        return Unmanaged.passRetained(event)
+        return Unmanaged.passUnretained(event)
+    
+    // other event like mouse movements
     default:
-        return Unmanaged.passRetained(event)
+        // TODO: should we apply hyper if escape has already been pressed?
+        // TODO: do we need to handle the event tap disabled events? aka enable again
+        return Unmanaged.passUnretained(event)
     }
 }
 
-
-
-
+print(main())
